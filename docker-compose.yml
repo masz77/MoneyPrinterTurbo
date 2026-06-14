@@ -1,5 +1,15 @@
 x-common-volumes: &common-volumes
   - ./:/MoneyPrinterTurbo
+  # why: codexcli provider 复用宿主机 Codex CLI 的订阅鉴权；必须 rw 挂载，
+  # 因为 codex 会刷新 token 并回写 auth.json，只读挂载会导致鉴权过期后失败。
+  # 用 ~ 而非 ${HOME}：compose 跨平台展开 ~，而 ${HOME} 在 Windows cmd/PowerShell
+  # 下未设置会让非 codexcli 用户的 `docker compose up` 直接失败
+  - ~/.codex:/root/.codex
+
+x-common-env: &common-env
+  # why: Claude Code 在 macOS 上把 OAuth 存 Keychain，无法像 ~/.codex 一样挂载文件；
+  # 官方 headless 方案是 `claude setup-token` 生成长效 token 经 env 注入（.env 文件提供）
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
 
 services:
   webui:
@@ -11,6 +21,7 @@ services:
       - "127.0.0.1:8501:8501"
     command: [ "streamlit", "run", "./webui/Main.py","--browser.serverAddress=127.0.0.1","--server.enableCORS=True","--browser.gatherUsageStats=False","--server.showEmailPrompt=False" ]
     volumes: *common-volumes
+    environment: *common-env
     restart: always
   api:
     build:
@@ -21,4 +32,5 @@ services:
       - "127.0.0.1:8080:8080"
     command: [ "python3", "main.py" ]
     volumes: *common-volumes
+    environment: *common-env
     restart: always
