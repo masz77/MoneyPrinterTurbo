@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import requests
 from typing import List
@@ -315,10 +316,133 @@ def _generate_response(prompt: str) -> str:
                 except Exception as e:
                     raise Exception(f"[{llm_provider}] error: {str(e)}")
 
+            elif llm_provider == "codexcli":
+                # why: Codex CLI 复用本机 ChatGPT 订阅鉴权（~/.codex/auth.json），
+                # 不走按量计费的 API key；适合已登录 codex 的本地/容器部署。
+                import shutil
+                import subprocess
+                import tempfile
+
+                codex_bin = config.app.get("codexcli_bin", "") or shutil.which(
+                    "codex"
+                )
+                if not codex_bin:
+                    raise ValueError(
+                        "[codexcli] codex binary not found. Install Codex CLI "
+                        "(npm i -g @openai/codex) and log in, or rebuild the "
+                        "Docker image which bundles it."
+                    )
+
+                model_name = config.app.get("codexcli_model_name", "")
+                # why: 视频脚本生成单次可达 30-60s，默认 180s 兜底防止 WebUI 永久卡死
+                timeout = int(config.app.get("codexcli_timeout", 180) or 180)
+
+                out_file = tempfile.NamedTemporaryFile(
+                    mode="r", suffix=".txt", delete=False
+                )
+                out_file.close()
+                try:
+                    cmd = [
+                        codex_bin,
+                        "exec",
+                        "--skip-git-repo-check",
+                        "--output-last-message",
+                        out_file.name,
+                    ]
+                    if config.is_running_in_container():
+                        # why: 容器是隔离边界（Landlock 在容器内不可用会直接报错）；
+                        # prompt 含用户输入的 video_subject，存在注入风险，但容器仅 rw 挂载
+                        # 项目目录与 ~/.codex，且 cwd 已指向临时目录缩小可写面
+                        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+                    else:
+                        cmd.extend(["--sandbox", "read-only"])
+                    if model_name:
+                        cmd.extend(["-m", model_name])
+                    # prompt 走 stdin（位置参数 "-"），避免超长参数和引号转义问题
+                    cmd.append("-")
+
+                    result = subprocess.run(
+                        cmd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        # why: codex exec 会从 cwd 读取 AGENTS.md，claude -p 会读 CLAUDE.md/.claude/，
+                        # 若在 /MoneyPrinterTurbo 运行会把项目上下文悄悄注入视频脚本，故切到临时目录
+                        cwd=tempfile.gettempdir(),
+                        timeout=timeout,
+                    )
+                    if result.returncode != 0:
+                        err = (result.stderr or result.stdout or "").strip()
+                        raise Exception(
+                            f"[codexcli] codex exec failed (exit {result.returncode}): {err[-500:]}"
+                        )
+                    with open(out_file.name, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    return _normalize_text_response(content, llm_provider)
+                except subprocess.TimeoutExpired:
+                    raise Exception(
+                        f"[codexcli] codex exec timed out after {timeout}s"
+                    )
+                finally:
+                    try:
+                        os.unlink(out_file.name)
+                    except OSError:
+                        pass
+
+            elif llm_provider == "claudecli":
+                # why: Claude Code CLI 走 Claude 订阅鉴权（容器内用 CLAUDE_CODE_OAUTH_TOKEN，
+                # 宿主机用本机登录态），与 codexcli 一样不消耗按量计费的 API key。
+                import shutil
+                import subprocess
+                import tempfile
+
+                claude_bin = config.app.get("claudecli_bin", "") or shutil.which("claude")
+                if not claude_bin:
+                    raise ValueError(
+                        "[claudecli] claude binary not found. Install Claude Code "
+                        "(npm i -g @anthropic-ai/claude-code), or rebuild the Docker "
+                        "image which bundles it."
+                    )
+
+                model_name = config.app.get("claudecli_model_name", "")
+                # why: 与 codexcli 保持一致的 180s 兜底，防止 WebUI 任务永久卡死
+                timeout = int(config.app.get("claudecli_timeout", 180) or 180)
+
+                # prompt 走 stdin，避免超长参数和引号转义问题；-p 为非交互 print 模式
+                cmd = [claude_bin, "-p", "--output-format", "text"]
+                if model_name:
+                    cmd.extend(["--model", model_name])
+
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        # why: claude -p 会从 cwd 读取 CLAUDE.md/.claude/，切到临时目录避免
+                        # 把项目上下文注入视频脚本（与 codexcli 同理）
+                        cwd=tempfile.gettempdir(),
+                        timeout=timeout,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise Exception(f"[claudecli] claude -p timed out after {timeout}s")
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "").strip()
+                    raise Exception(
+                        f"[claudecli] claude -p failed (exit {result.returncode}): {err[-500:]} "
+                        "(hint: run `claude setup-token` on the host and set "
+                        "CLAUDE_CODE_OAUTH_TOKEN in a .env file next to docker-compose.yml)"
+                    )
+                return _normalize_text_response(result.stdout, llm_provider)
+
             elif llm_provider == "litellm":
                 model_name = config.app.get("litellm_model_name")
 
-            if llm_provider not in ["pollinations", "ollama", "litellm"]:  # Skip validation for providers that don't require API key
+            if llm_provider not in ["pollinations", "ollama", "litellm", "codexcli", "claudecli"]:  # Skip validation for providers that don't require API key
                 if not api_key:
                     raise ValueError(
                         f"{llm_provider}: api_key is not set, please set it in the config.toml file."
@@ -792,8 +916,9 @@ Please note that you must use English for generating video search terms; Chinese
         try:
             response = _generate_response(prompt)
             if "Error: " in response:
-                logger.error(f"failed to generate video script: {response}")
-                return response
+                logger.error(f"failed to generate video terms: {response}")
+                # 2026-06-10: 返回 [] 而非错误字符串 —— 错误字符串是 truthy，会绕过 task.py 的 `if not video_terms` 检查，把 "Error: ..." 当作素材搜索词
+                return []
             search_terms = json.loads(_strip_code_fence(response))
             if not isinstance(search_terms, list) or not all(
                 isinstance(term, str) for term in search_terms

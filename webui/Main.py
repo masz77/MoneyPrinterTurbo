@@ -306,6 +306,8 @@ if not config.app.get("hide_config", False):
                 ("MiMo", "mimo"),
                 ("Pollinations", "pollinations"),
                 ("LiteLLM", "litellm"),
+                ("Codex CLI", "codexcli"),
+                ("Claude CLI", "claudecli"),
             ]
             llm_provider_labels = [label for label, _ in llm_provider_options]
             llm_provider_values = {
@@ -353,6 +355,24 @@ if not config.app.get("hide_config", False):
                                 - 如果 `MoneyPrinterTurbo` 和 `Ollama` **不在同一台机器上**，需要填写 `Ollama` 机器的IP地址
                                 - 如果 `MoneyPrinterTurbo` 是 `Docker` 部署，建议填写 `http://host.docker.internal:11434/v1`{docker_hint}
                             - **Model Name**: 使用 `ollama list` 查看，比如 `qwen:7b`
+                            """
+
+            if llm_provider == "codexcli":
+                with llm_helper:
+                    tips = """
+                            ##### Codex CLI 配置说明
+                            - 使用本机已登录的 **Codex CLI**（ChatGPT 订阅鉴权），**无需 API Key**
+                            - Docker 部署：镜像已内置 codex，docker-compose 会挂载宿主机 `~/.codex`
+                            - **Model Name**: 可留空，默认使用 codex 自身配置的模型
+                            """
+
+            if llm_provider == "claudecli":
+                with llm_helper:
+                    tips = """
+                            ##### Claude CLI 配置说明
+                            - 使用 **Claude Code CLI**（Claude 订阅鉴权），**无需 API Key**
+                            - Docker 部署：先在宿主机运行 `claude setup-token`，把 token 写入 docker-compose.yml 旁的 `.env` 文件（`CLAUDE_CODE_OAUTH_TOKEN=...`），重启容器生效
+                            - **Model Name**: 可留空，默认使用 claude 自身配置的模型
                             """
 
             if llm_provider == "openai":
